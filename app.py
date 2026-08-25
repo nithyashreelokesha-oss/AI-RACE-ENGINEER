@@ -66,6 +66,166 @@ st.caption(
 
 
 # ============================================================
+# CUSTOM RACE START
+# ============================================================
+
+with st.expander("🏁 Custom Race Start", expanded=True):
+
+    st.caption(
+        "Start the simulation from any lap and race state. "
+        "Set the gaps, starting position, sector layout and current tyre/energy state."
+    )
+
+    custom_col1, custom_col2, custom_col3, custom_col4 = st.columns(4)
+
+    with custom_col1:
+        custom_total_laps = st.number_input(
+            "Total Laps",
+            min_value=1,
+            max_value=200,
+            value=int(simulator.race.get("total_laps", 57)),
+            step=1
+        )
+
+    with custom_col2:
+        custom_start_lap = st.number_input(
+            "Start Lap",
+            min_value=1,
+            max_value=int(custom_total_laps),
+            value=min(
+                int(simulator.race.get("lap", 1)),
+                int(custom_total_laps)
+            ),
+            step=1
+        )
+
+    with custom_col3:
+        custom_start_position = st.number_input(
+            "Starting Position",
+            min_value=1,
+            max_value=20,
+            value=int(simulator.race.get("position", 6)),
+            step=1
+        )
+
+    with custom_col4:
+        custom_start_sector = st.selectbox(
+            "Starting Sector",
+            [1, 2, 3],
+            index=int(simulator.race.get("sector", 1)) - 1
+        )
+
+    gap_col1, gap_col2, tyre_col1, tyre_col2 = st.columns(4)
+
+    with gap_col1:
+        custom_gap_ahead = st.number_input(
+            "Gap Ahead (s)",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.65 if custom_start_position > 1 else 0.0,
+            step=0.05
+        )
+
+    with gap_col2:
+        custom_gap_behind = st.number_input(
+            "Gap Behind (s)",
+            min_value=0.05,
+            max_value=10.0,
+            value=0.90,
+            step=0.05
+        )
+
+    with tyre_col1:
+        custom_compound = st.selectbox(
+            "Starting Tyre Compound",
+            ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"],
+            index=["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"].index(
+                simulator.race.get("tyre_compound", "MEDIUM")
+            )
+        )
+
+    with tyre_col2:
+        custom_tyre_age = st.number_input(
+            "Starting Tyre Age (laps)",
+            min_value=0.0,
+            max_value=60.0,
+            value=float(simulator.race.get("tyre_age", 0.0)),
+            step=0.1
+        )
+
+    battery_col, sector1_col, sector2_col, sector3_col = st.columns(4)
+
+    with battery_col:
+        custom_battery = st.number_input(
+            "Starting Battery (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(simulator.race.get("battery", 100.0)),
+            step=1.0
+        )
+
+    sector_options = [
+        "HIGH_SPEED",
+        "TECHNICAL",
+        "STRAIGHT",
+        "MEDIUM_SPEED",
+        "SLOW_CORNER"
+    ]
+
+    current_sector_types = simulator.sector_types
+
+    with sector1_col:
+        custom_s1 = st.selectbox(
+            "Sector 1 Type",
+            sector_options,
+            index=sector_options.index(
+                current_sector_types.get(1, "HIGH_SPEED")
+            )
+        )
+
+    with sector2_col:
+        custom_s2 = st.selectbox(
+            "Sector 2 Type",
+            sector_options,
+            index=sector_options.index(
+                current_sector_types.get(2, "TECHNICAL")
+            )
+        )
+
+    with sector3_col:
+        custom_s3 = st.selectbox(
+            "Sector 3 Type",
+            sector_options,
+            index=sector_options.index(
+                current_sector_types.get(3, "STRAIGHT")
+            )
+        )
+
+    if st.button(
+        "🏁 START CUSTOM RACE",
+        type="primary",
+        use_container_width=True
+    ):
+        st.session_state.simulator = RaceSimulator(
+            total_laps=int(custom_total_laps),
+            start_lap=int(custom_start_lap),
+            start_position=int(custom_start_position),
+            gap_ahead=float(custom_gap_ahead),
+            gap_behind=float(custom_gap_behind),
+            start_sector=int(custom_start_sector),
+            sector_types={
+                1: custom_s1,
+                2: custom_s2,
+                3: custom_s3
+            },
+            start_compound=custom_compound,
+            start_tyre_age=float(custom_tyre_age),
+            start_battery=float(custom_battery)
+        )
+        st.rerun()
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 
@@ -440,6 +600,59 @@ with action3:
 
 
 # ============================================================
+# DRIVER CONTROL / AI OVERRIDE
+# ============================================================
+
+st.subheader("🎮 Driver Control")
+
+control_col1, control_col2, control_col3 = st.columns(3)
+
+with control_col1:
+    control_mode = st.radio(
+        "Who controls this sector?",
+        ["Follow AI", "Manual Driver Input"],
+        horizontal=True
+    )
+
+if control_mode == "Manual Driver Input":
+    with control_col2:
+        driver_deployment = st.selectbox(
+            "Driver Deployment",
+            ["PUSH", "BALANCED", "HARVEST", "CONSERVE"],
+            index=["PUSH", "BALANCED", "HARVEST", "CONSERVE"].index(
+                deployment_mode
+            )
+        )
+
+    with control_col3:
+        driver_strategy = st.selectbox(
+            "Driver Strategy",
+            ["ATTACK", "STAY", "DEFEND"],
+            index=["ATTACK", "STAY", "DEFEND"].index(
+                recommendation
+            )
+        )
+
+    actual_deployment = driver_deployment
+    actual_strategy = driver_strategy
+    driver_controlled = True
+
+    st.warning(
+        f"AI recommends **{deployment_mode} + {recommendation}**, "
+        f"but the driver will use **{actual_deployment} + {actual_strategy}**. "
+        "The simulator will carry the consequences of this override forward."
+    )
+else:
+    actual_deployment = deployment_mode
+    actual_strategy = recommendation
+    driver_controlled = False
+
+    st.success(
+        f"Driver follows AI: **{deployment_mode} + {recommendation}**"
+    )
+
+
+# ============================================================
 # RUN SECTOR
 # ============================================================
 
@@ -450,8 +663,11 @@ if st.button(
 ):
 
     result = simulator.update(
-        deployment_mode,
-        recommendation
+        actual_deployment,
+        actual_strategy,
+        ai_deployment_mode=deployment_mode,
+        ai_recommendation=recommendation,
+        driver_controlled=driver_controlled
     )
 
     if result["overtook"]:
@@ -761,6 +977,44 @@ with tab3:
 
     st.divider()
 
+    st.subheader("🎮 Driver / AI Alignment")
+
+    a1, a2, a3, a4 = st.columns(4)
+
+    with a1:
+        st.metric(
+            "AI Follows",
+            race["ai_follow_count"]
+        )
+
+    with a2:
+        st.metric(
+            "Driver Overrides",
+            race["driver_override_count"]
+        )
+
+    with a3:
+        st.metric(
+            "Strategy Deviation",
+            f"{race["strategy_deviation"]:.1f}"
+        )
+
+    with a4:
+        st.metric(
+            "Last Override",
+            "YES" if race["last_driver_override"] else "NO"
+        )
+
+    if race["last_driver_override"]:
+        st.caption(
+            f"Last AI plan: **{race["last_ai_deployment"]} + "
+            f"{race["last_ai_recommendation"]}** • "
+            f"Driver energy penalty: **{race["driver_energy_penalty"]:.1f}%** • "
+            f"Tyre penalty: **{race["driver_tyre_penalty"]:.1f}%**"
+        )
+
+    st.divider()
+
     st.subheader("🔮 What-If Analysis")
 
     if st.button(
@@ -953,5 +1207,5 @@ st.divider()
 
 st.caption(
     "AI Race Engineer • Sector-level race intelligence • "
-    "Energy • Overtaking • Tyres • Strategy • Random Forest"
+    "Energy • Overtaking • Tyres • Strategy • Hybrid ML"
 )
