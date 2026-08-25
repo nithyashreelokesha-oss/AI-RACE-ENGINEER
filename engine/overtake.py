@@ -1,826 +1,849 @@
 import os
+import math
 import joblib
 import pandas as pd
 
 
 # ============================================================
-# MODEL PATH
+# CONFIGURATION
 # ============================================================
 
 MODEL_PATH = os.path.join(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
-    ),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "ml",
     "overtake_model.pkl"
 )
 
-
-# ============================================================
-# ML STATE
-# ============================================================
+DEFAULT_THRESHOLD = 0.50
 
 ML_MODEL = None
 ML_AVAILABLE = False
 ML_ERROR = None
+MODEL_THRESHOLD = DEFAULT_THRESHOLD
+MODEL_FEATURES = []
 
 
 # ============================================================
-# LOAD MODEL
+# MODEL LOADING
 # ============================================================
 
-try:
+def _load_model():
+    global ML_MODEL, ML_AVAILABLE, ML_ERROR
+    global MODEL_THRESHOLD, MODEL_FEATURES
+
+    if ML_MODEL is not None:
+        return True
 
     if not os.path.exists(MODEL_PATH):
+        ML_AVAILABLE = False
+        ML_ERROR = f"Model file not found: {MODEL_PATH}"
+        return False
 
-        raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}"
+    try:
+        package = joblib.load(MODEL_PATH)
+    except Exception as error:
+        ML_MODEL = None
+        ML_AVAILABLE = False
+        ML_ERROR = f"{type(error).__name__}: {error}"
+        print(f"[ML] Failed to load overtake model: {ML_ERROR}")
+        return False
+
+    if isinstance(package, dict):
+        ML_MODEL = package.get("pipeline") or package.get("model")
+
+        MODEL_THRESHOLD = float(
+            package.get(
+                "recommended_threshold",
+                package.get("threshold", DEFAULT_THRESHOLD)
+            )
         )
 
-    ML_MODEL = joblib.load(
-        MODEL_PATH
-    )
+        MODEL_FEATURES = package.get(
+            "features",
+            package.get("feature_list", [])
+        )
+    else:
+        ML_MODEL = package
+        MODEL_THRESHOLD = DEFAULT_THRESHOLD
+        MODEL_FEATURES = []
+
+    if ML_MODEL is None:
+        ML_AVAILABLE = False
+        ML_ERROR = "Model package loaded but no model/pipeline was found."
+        return False
 
     ML_AVAILABLE = True
     ML_ERROR = None
+    return True
 
-except Exception as error:
-
-    ML_MODEL = None
-    ML_AVAILABLE = False
-    ML_ERROR = str(error)
-
-
-# ============================================================
-# ML STATUS
-# ============================================================
 
 def get_ml_status():
+    _load_model()
 
     return {
         "available": ML_AVAILABLE,
         "model_loaded": ML_MODEL is not None,
         "model_path": MODEL_PATH,
+        "threshold": MODEL_THRESHOLD,
+        "features": MODEL_FEATURES,
+        "error": ML_ERROR
+    }
+
+
+def get_model_info():
+    _load_model()
+
+    return {
+        "available": ML_AVAILABLE,
+        "path": MODEL_PATH,
+        "threshold": MODEL_THRESHOLD,
+        "features": MODEL_FEATURES,
         "error": ML_ERROR
     }
 
 
 # ============================================================
-# CLAMP
+# HELPERS
 # ============================================================
 
-def clamp(
-    value,
-    minimum=0.0,
-    maximum=1.0
-):
-
-    return max(
-        minimum,
-        min(
-            float(value),
-            maximum
-        )
-    )
+def _safe_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        value = float(value)
+        if not math.isfinite(value):
+            return default
+        return value
+    except Exception:
+        return default
 
 
-# ============================================================
-# RULE FACTOR
-# ============================================================
-
-def calculate_rule_factor(race):
-
-    track_limit_risk = clamp(
-        race.get(
-            "track_limit_risk",
-            0.0
-        )
-    )
-
-    race_condition = race.get(
-        "race_condition",
-        "NORMAL"
-    )
-
-    condition_factor = {
-
-        "NORMAL": 1.00,
-
-        "WET": 0.88,
-
-        "VSC": 0.35,
-
-        "SAFETY CAR": 0.10
-
-    }.get(
-        race_condition,
-        1.00
-    )
-
-    track_factor = (
-        1.0
-        - 0.35 * track_limit_risk
-    )
-
-    return clamp(
-        condition_factor
-        * track_factor
-    )
+def clamp(value, minimum=0.0, maximum=1.0):
+    return max(minimum, min(float(value), maximum))
 
 
 # ============================================================
-# HEURISTIC MODEL
+# ML FEATURE BUILDER
 # ============================================================
-
-def calculate_heuristic_probability(race):
-
-    gap = float(
-        race.get(
-            "gap_ahead",
-            2.0
-        )
-    )
-
-    # --------------------------------------------------------
-    # GAP
-    # --------------------------------------------------------
-
-    if gap <= 0.30:
-
-        gap_score = 1.00
-
-    elif gap <= 0.60:
-
-        gap_score = 0.85
-
-    elif gap <= 1.00:
-
-        gap_score = 0.65
-
-    elif gap <= 1.50:
-
-        gap_score = 0.40
-
-    else:
-
-        gap_score = 0.15
-
-
-    # --------------------------------------------------------
-    # PACE
-    # --------------------------------------------------------
-
-    pace_score = clamp(
-        (
-            race.get(
-                "pace_advantage",
-                0.5
-            )
-            + 0.5
-        )
-        / 1.0
-    )
-
-
-    # --------------------------------------------------------
-    # TYRES
-    # --------------------------------------------------------
-
-    tyre_score = clamp(
-        race.get(
-            "tyre_advantage",
-            0.5
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # ENERGY
-    # --------------------------------------------------------
-
-    energy_score = clamp(
-        race.get(
-            "battery",
-            100.0
-        )
-        / 100.0
-    )
-
-
-    # --------------------------------------------------------
-    # OPPORTUNITY
-    # --------------------------------------------------------
-
-    opportunity_score = clamp(
-        race.get(
-            "overtake_opportunity",
-            0.5
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # RULES
-    # --------------------------------------------------------
-
-    rule_factor = calculate_rule_factor(
-        race
-    )
-
-
-    # --------------------------------------------------------
-    # SCORE
-    # --------------------------------------------------------
-
-    score = (
-
-        gap_score * 0.23
-
-        + pace_score * 0.18
-
-        + tyre_score * 0.14
-
-        + energy_score * 0.14
-
-        + opportunity_score * 0.21
-
-        + rule_factor * 0.10
-    )
-
-    return clamp(
-        score
-    )
-
-
-# ============================================================
-# BUILD ML FEATURES
+#
+# MUST match the leakage-free training model.
+#
+# Never add:
+#   next_position
+#   position_delta
+#   position_gain
+#   position_gain_strength
+#   overtake
+#
+# Those contain future/target information.
 # ============================================================
 
 def build_ml_features(race):
 
+    lap = _safe_float(race.get("lap", 1), 1)
+    position = _safe_float(race.get("position", 10), 10)
+
+    # Current simulator may not yet have real telemetry fields.
+    # Missing values are therefore represented safely.
+    lap_time = _safe_float(race.get("lap_time", 0), 0)
+    previous_lap_time = _safe_float(
+        race.get("previous_lap_time", lap_time),
+        lap_time
+    )
+
+    speed_mean = _safe_float(race.get("speed_mean", 0), 0)
+    speed_max = _safe_float(race.get("speed_max", speed_mean), speed_mean)
+    speed_min = _safe_float(race.get("speed_min", speed_mean), speed_mean)
+
+    speed_range = _safe_float(
+        race.get("speed_range", speed_max - speed_min),
+        0
+    )
+
+    speed_std = _safe_float(
+        race.get("speed_std", 0),
+        0
+    )
+
+    speed_variation = _safe_float(
+        race.get("speed_variation", 0),
+        0
+    )
+
+    throttle_mean = _safe_float(
+        race.get("throttle_mean", 0),
+        0
+    )
+
+    throttle_max = _safe_float(
+        race.get("throttle_max", throttle_mean),
+        throttle_mean
+    )
+
+    throttle_full_usage = _safe_float(
+        race.get("throttle_full_usage", 0),
+        0
+    )
+
+    brake_mean = _safe_float(
+        race.get("brake_mean", 0),
+        0
+    )
+
+    brake_max = _safe_float(
+        race.get("brake_max", brake_mean),
+        brake_mean
+    )
+
+    brake_usage = _safe_float(
+        race.get("brake_usage", 0),
+        0
+    )
+
+    heavy_braking_usage = _safe_float(
+        race.get("heavy_braking_usage", 0),
+        0
+    )
+
+    rpm_mean = _safe_float(
+        race.get("rpm_mean", 0),
+        0
+    )
+
+    rpm_max = _safe_float(
+        race.get("rpm_max", rpm_mean),
+        rpm_mean
+    )
+
+    gear_mean = _safe_float(
+        race.get("gear_mean", 0),
+        0
+    )
+
+    gear_max = _safe_float(
+        race.get("gear_max", gear_mean),
+        gear_mean
+    )
+
+    gear_std = _safe_float(
+        race.get("gear_std", 0),
+        0
+    )
+
+    power_braking_balance = _safe_float(
+        race.get("power_braking_balance", 0),
+        0
+    )
+
+    tyre_life = _safe_float(
+        race.get(
+            "tyre_life",
+            race.get("tyre_age", 0)
+        ),
+        0
+    )
+
+    tyre_life_squared = tyre_life * tyre_life
+
+    position_ahead = max(1.0, position - 1.0)
+
+    compound = str(
+        race.get(
+            "compound",
+            race.get("tyre_compound", "MEDIUM")
+        )
+    ).upper()
+
+    track_status = str(
+        race.get("track_status", "1")
+    )
+
     return {
+        "lap": lap,
+        "position": position,
+        "lap_time": lap_time,
+        "previous_lap_time": previous_lap_time,
 
-        "lap":
-            race.get(
-                "lap",
-                1
-            ),
+        "speed_mean": speed_mean,
+        "speed_max": speed_max,
+        "speed_min": speed_min,
+        "speed_range": speed_range,
+        "speed_std": speed_std,
+        "speed_variation": speed_variation,
 
-        "sector":
-            race.get(
-                "sector",
-                1
-            ),
+        "throttle_mean": throttle_mean,
+        "throttle_max": throttle_max,
+        "throttle_full_usage": throttle_full_usage,
 
-        "position":
-            race.get(
-                "position",
-                6
-            ),
+        "brake_mean": brake_mean,
+        "brake_max": brake_max,
+        "brake_usage": brake_usage,
+        "heavy_braking_usage": heavy_braking_usage,
 
-        "battery":
-            race.get(
-                "battery",
-                100.0
-            ),
+        "rpm_mean": rpm_mean,
+        "rpm_max": rpm_max,
 
-        "gap_ahead":
-            race.get(
-                "gap_ahead",
-                1.0
-            ),
+        "gear_mean": gear_mean,
+        "gear_max": gear_max,
+        "gear_std": gear_std,
 
-        "gap_behind":
-            race.get(
-                "gap_behind",
-                1.0
-            ),
+        "power_braking_balance": power_braking_balance,
 
-        "tyre_advantage":
-            race.get(
-                "tyre_advantage",
-                0.5
-            ),
+        "tyre_life": tyre_life,
+        "tyre_life_squared": tyre_life_squared,
 
-        "pace_advantage":
-            race.get(
-                "pace_advantage",
-                0.5
-            ),
+        "position_ahead": position_ahead,
 
-        "overtake_opportunity":
-            race.get(
-                "overtake_opportunity",
-                0.5
-            ),
-
-        "future_opportunity":
-            race.get(
-                "future_opportunity",
-                0.5
-            ),
-
-        "threat_level":
-            race.get(
-                "threat_level",
-                0.5
-            ),
-
-        "sector_type":
-            race.get(
-                "sector_type",
-                "HIGH_SPEED"
-            ),
-
-        "sector_energy_demand":
-            race.get(
-                "sector_energy_demand",
-                1.0
-            ),
-
-        "sector_overtaking_base":
-            race.get(
-                "sector_overtaking_base",
-                0.5
-            ),
-
-        "sector_braking_importance":
-            race.get(
-                "sector_braking_importance",
-                0.5
-            ),
-
-        "sector_traction_importance":
-            race.get(
-                "sector_traction_importance",
-                0.5
-            ),
-
-        "deployment_mode":
-            race.get(
-                "deployment_mode",
-                "BALANCED"
-            ),
-
-        "recommendation":
-            race.get(
-                "recommendation",
-                "ATTACK"
-            )
+        "compound": compound,
+        "track_status": track_status
     }
 
 
 # ============================================================
-# RANDOM FOREST PREDICTION
+# RAW ML PROBABILITY
 # ============================================================
 
 def calculate_ml_probability(race):
 
-    global ML_ERROR
-
-    if not ML_AVAILABLE:
-
+    if not _load_model():
         return None
-
-
-    features = build_ml_features(
-        race
-    )
-
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # Use DataFrame instead of:
-    #
-    #     [features]
-    #
-    # This preserves feature names for sklearn.
-    # --------------------------------------------------------
-
-    df = pd.DataFrame(
-        [features]
-    )
-
 
     try:
+        features = build_ml_features(race)
+        dataframe = pd.DataFrame([features])
 
-        # ====================================================
-        # CHECK EXPECTED FEATURES
-        # ====================================================
+        probabilities = ML_MODEL.predict_proba(dataframe)
 
-        if hasattr(
-            ML_MODEL,
-            "feature_names_in_"
+        if (
+            getattr(probabilities, "ndim", 0) != 2
+            or probabilities.shape[1] < 2
         ):
-
-            expected_features = list(
-                ML_MODEL.feature_names_in_
+            raise ValueError(
+                f"Unexpected probability shape: "
+                f"{getattr(probabilities, 'shape', None)}"
             )
 
-            # Add missing columns if necessary.
-
-            for column in expected_features:
-
-                if column not in df.columns:
-
-                    df[column] = 0
-
-
-            # Remove unexpected columns and preserve
-            # training order.
-
-            df = df[
-                expected_features
-            ]
-
-
-        # ====================================================
-        # RANDOM FOREST PREDICTION
-        # ====================================================
-
-        probabilities = (
-            ML_MODEL.predict_proba(
-                df
-            )
-        )
-
-
-        # ====================================================
-        # BINARY CLASSIFICATION
-        # ====================================================
-
-        if probabilities.shape[1] >= 2:
-
-            probability = (
-                probabilities[0][1]
-            )
-
-        else:
-
-            probability = (
-                probabilities[0][0]
-            )
-
-
-        ML_ERROR = None
-
-        return clamp(
-            probability
-        )
-
+        return clamp(float(probabilities[0][1]))
 
     except Exception as error:
-
-        # Do NOT silently hide the error.
-
-        ML_ERROR = (
-            f"{type(error).__name__}: "
-            f"{str(error)}"
-        )
-
+        global ML_ERROR
+        ML_ERROR = f"{type(error).__name__}: {error}"
+        print(f"[ML] Prediction failed: {ML_ERROR}")
         return None
 
 
 # ============================================================
-# SECTOR FACTOR
+# GAP SCORE
 # ============================================================
 
-def calculate_sector_factor(race):
+def calculate_gap_score(gap):
+    gap = max(0.0, _safe_float(gap, 99.0))
 
+    if gap <= 0.20:
+        return 1.00
+    if gap <= 0.30:
+        return 0.95
+    if gap <= 0.40:
+        return 0.88
+    if gap <= 0.50:
+        return 0.78
+    if gap <= 0.60:
+        return 0.62
+    if gap <= 0.75:
+        return 0.42
+    if gap <= 0.90:
+        return 0.24
+    if gap <= 1.10:
+        return 0.10
+
+    return 0.0
+
+
+# ============================================================
+# SECTOR SCORE
+# ============================================================
+
+def calculate_sector_score(race):
     return clamp(
-        race.get(
-            "sector_overtaking_base",
-            0.5
+        _safe_float(
+            race.get("sector_overtaking_base", 0.50),
+            0.50
         )
     )
 
 
 # ============================================================
-# HYBRID MODEL
+# PACE SCORE
+# ============================================================
+
+def calculate_pace_score(race):
+    pace = clamp(
+        _safe_float(
+            race.get("pace_advantage", 0.50),
+            0.50
+        )
+    )
+
+    return clamp(
+        0.50 + (pace - 0.50) * 1.50
+    )
+
+
+# ============================================================
+# TYRE SCORE
+# ============================================================
+
+def calculate_tyre_score(race):
+    return clamp(
+        _safe_float(
+            race.get("tyre_advantage", 0.50),
+            0.50
+        )
+    )
+
+
+# ============================================================
+# BATTERY SCORE
+# ============================================================
+
+def calculate_battery_score(race):
+    battery = _safe_float(
+        race.get("battery", 100),
+        100
+    )
+
+    if battery >= 70:
+        return 1.00
+    if battery >= 50:
+        return 0.90
+    if battery >= 35:
+        return 0.75
+    if battery >= 25:
+        return 0.55
+    if battery >= 15:
+        return 0.35
+
+    return 0.15
+
+
+# ============================================================
+# RACE CONDITION
+# ============================================================
+
+def calculate_race_condition_factor(race):
+    condition = str(
+        race.get("race_condition", "NORMAL")
+    ).upper()
+
+    if condition == "SAFETY CAR":
+        return 0.05
+
+    if condition == "VSC":
+        return 0.20
+
+    if condition == "WET":
+        return 0.80
+
+    return 1.00
+
+
+# ============================================================
+# TRACK LIMITS
+# ============================================================
+
+def calculate_track_factor(race):
+    risk = clamp(
+        _safe_float(
+            race.get("track_limit_risk", 0),
+            0
+        )
+    )
+
+    return clamp(
+        1.0 - 0.20 * risk
+    )
+
+
+# ============================================================
+# HEURISTIC PROBABILITY
+# ============================================================
+
+def calculate_heuristic_probability(race):
+
+    gap_score = calculate_gap_score(
+        race.get("gap_ahead", 99)
+    )
+
+    sector_score = calculate_sector_score(race)
+    pace_score = calculate_pace_score(race)
+    tyre_score = calculate_tyre_score(race)
+    battery_score = calculate_battery_score(race)
+
+    opportunity = clamp(
+        _safe_float(
+            race.get("overtake_opportunity", 0.50),
+            0.50
+        )
+    )
+
+    future = clamp(
+        _safe_float(
+            race.get("future_opportunity", 0.50),
+            0.50
+        )
+    )
+
+    condition_factor = calculate_race_condition_factor(race)
+    track_factor = calculate_track_factor(race)
+
+    # Current gap is deliberately dominant because the simulator
+    # is making a real-time decision, not predicting a historical
+    # lap-to-lap position change in isolation.
+    score = (
+        0.38 * gap_score
+        + 0.18 * sector_score
+        + 0.15 * pace_score
+        + 0.10 * tyre_score
+        + 0.07 * battery_score
+        + 0.07 * opportunity
+        + 0.05 * future
+    )
+
+    score *= condition_factor
+    score *= track_factor
+
+    return clamp(score)
+
+
+# ============================================================
+# HYBRID PROBABILITY
 # ============================================================
 
 def calculate_overtake_probability(race):
 
-    # --------------------------------------------------------
-    # P1
-    # --------------------------------------------------------
+    ml_probability = calculate_ml_probability(race)
+    heuristic_probability = calculate_heuristic_probability(race)
 
-    if race.get(
-        "position",
-        6
-    ) <= 1:
+    if ml_probability is None:
+        return heuristic_probability
 
-        return 0.0
-
-
-    # --------------------------------------------------------
-    # ML
-    # --------------------------------------------------------
-
-    ml_probability = (
-        calculate_ml_probability(
-            race
+    gap = max(
+        0.0,
+        _safe_float(
+            race.get("gap_ahead", 99),
+            99
         )
     )
 
+    sector = calculate_sector_score(race)
+    pace = calculate_pace_score(race)
+    tyre = calculate_tyre_score(race)
+
+    condition = str(
+        race.get("race_condition", "NORMAL")
+    ).upper()
 
     # --------------------------------------------------------
-    # HEURISTIC
+    # Base hybrid
+    # --------------------------------------------------------
+    #
+    # ML provides learned telemetry context.
+    # Heuristics provide the simulator's current race state.
+    #
+    # We intentionally do NOT allow ML to dominate the decision.
     # --------------------------------------------------------
 
-    heuristic_probability = (
-        calculate_heuristic_probability(
-            race
+    # The simulator does not have raw lap telemetry, so the historical
+    # telemetry model is treated as supporting evidence rather than the
+    # primary decision signal.
+    hybrid = (
+        0.30 * ml_probability
+        + 0.70 * heuristic_probability
+    )
+
+    # --------------------------------------------------------
+    # Gap correction
+    # --------------------------------------------------------
+    #
+    # Historical ML cannot directly know the simulator's current
+    # gap because gap is not a training feature.
+    #
+    # Therefore current gap gets an explicit correction.
+    # --------------------------------------------------------
+
+    if gap <= 0.30:
+        hybrid += 0.20
+
+    elif gap <= 0.40:
+        hybrid += 0.15
+
+    elif gap <= 0.50:
+        hybrid += 0.10
+
+    elif gap <= 0.60:
+        hybrid += 0.05
+
+    elif gap > 1.20:
+        hybrid -= 0.18
+
+    elif gap > 0.90:
+        hybrid -= 0.10
+
+    # --------------------------------------------------------
+    # Strong opportunity correction
+    # --------------------------------------------------------
+
+    opportunity = clamp(
+        _safe_float(
+            race.get("overtake_opportunity", 0.50),
+            0.50
         )
     )
 
+    if opportunity >= 0.75:
+        hybrid += 0.07
+    elif opportunity >= 0.60:
+        hybrid += 0.035
+    elif opportunity < 0.25:
+        hybrid -= 0.06
 
     # --------------------------------------------------------
-    # HYBRID
+    # Sector correction
     # --------------------------------------------------------
 
-    if ml_probability is not None:
-
-        probability = (
-
-            ml_probability * 0.70
-
-            + heuristic_probability * 0.30
-        )
-
-    else:
-
-        # If RF genuinely cannot run, the AI still works
-        # using the heuristic model.
-
-        probability = (
-            heuristic_probability
-        )
-
+    if sector >= 0.70:
+        hybrid += 0.07
+    elif sector < 0.30:
+        hybrid -= 0.10
 
     # --------------------------------------------------------
-    # SECTOR
+    # Pace correction
     # --------------------------------------------------------
 
-    sector_factor = (
-        calculate_sector_factor(
-            race
-        )
-    )
+    if pace >= 0.70:
+        hybrid += 0.07
+    elif pace < 0.35:
+        hybrid -= 0.08
 
-    probability = (
+    # --------------------------------------------------------
+    # Tyre correction
+    # --------------------------------------------------------
 
-        probability * 0.75
+    if tyre >= 0.70:
+        hybrid += 0.04
+    elif tyre < 0.30:
+        hybrid -= 0.08
 
-        + sector_factor * 0.25
-    )
+    # --------------------------------------------------------
+    # Race control
+    # --------------------------------------------------------
 
+    if condition in ("VSC", "SAFETY CAR"):
+        hybrid = min(hybrid, 0.08)
 
-    # ========================================================
-    # GAP
-    # ========================================================
+    # --------------------------------------------------------
+    # Battery
+    # --------------------------------------------------------
 
-    gap = float(
-        race.get(
-            "gap_ahead",
-            2.0
-        )
-    )
-
-    if gap > 2.0:
-
-        probability *= 0.25
-
-    elif gap > 1.5:
-
-        probability *= 0.50
-
-
-    # ========================================================
-    # TYRES
-    # ========================================================
-
-    tyre_advantage = clamp(
-        race.get(
-            "tyre_advantage",
-            0.5
-        )
-    )
-
-    if tyre_advantage < 0.20:
-
-        probability *= 0.50
-
-    elif tyre_advantage < 0.35:
-
-        probability *= 0.75
-
-
-    # ========================================================
-    # BATTERY
-    # ========================================================
-
-    battery = float(
-        race.get(
-            "battery",
-            100.0
-        )
+    battery = _safe_float(
+        race.get("battery", 100),
+        100
     )
 
     if battery < 15:
-
-        probability *= 0.40
-
+        hybrid *= 0.45
     elif battery < 25:
+        hybrid *= 0.70
 
-        probability *= 0.65
+    # --------------------------------------------------------
+    # Track limits
+    # --------------------------------------------------------
+
+    hybrid *= calculate_track_factor(race)
+
+    return clamp(hybrid)
 
 
-    # ========================================================
-    # OPPORTUNITY
-    # ========================================================
+# ============================================================
+# ATTACK DECISION
+# ============================================================
+
+def attack_is_allowed(race):
+
+    position = int(
+        _safe_float(
+            race.get("position", 10),
+            10
+        )
+    )
+
+    if position <= 1:
+        return False
+
+    condition = str(
+        race.get("race_condition", "NORMAL")
+    ).upper()
+
+    if condition in ("VSC", "SAFETY CAR"):
+        return False
+
+    gap = _safe_float(
+        race.get("gap_ahead", 99),
+        99
+    )
+
+    if gap > 1.20:
+        return False
+
+    sector = calculate_sector_score(race)
+
+    # A poor overtaking sector can still be attacked if the cars
+    # are already extremely close.
+    if sector < 0.25 and gap > 0.45:
+        return False
+
+    return True
+
+
+# ============================================================
+# RECOMMENDATION
+# ============================================================
+
+def get_overtake_recommendation(race):
+
+    probability = calculate_overtake_probability(race)
+
+    gap = _safe_float(
+        race.get("gap_ahead", 99),
+        99
+    )
+
+    threat = clamp(
+        _safe_float(
+            race.get("threat_level", 0.40),
+            0.40
+        )
+    )
 
     opportunity = clamp(
-        race.get(
-            "overtake_opportunity",
-            0.5
+        _safe_float(
+            race.get("overtake_opportunity", 0.50),
+            0.50
         )
     )
 
-    if opportunity < 0.25:
+    sector = calculate_sector_score(race)
+    pace = calculate_pace_score(race)
+    tyre = calculate_tyre_score(race)
+    battery = calculate_battery_score(race)
 
-        probability *= 0.45
+    condition = str(
+        race.get("race_condition", "NORMAL")
+    ).upper()
 
-    elif opportunity < 0.40:
+    if condition in ("VSC", "SAFETY CAR"):
+        return "DEFEND" if threat >= 0.70 else "STAY"
 
-        probability *= 0.70
+    if not attack_is_allowed(race):
+        if threat >= 0.72:
+            return "DEFEND"
+        return "STAY"
 
+    # --------------------------------------------------------
+    # Clear immediate attack windows.
+    # Current gap is intentionally dominant here.
+    # --------------------------------------------------------
 
-    # ========================================================
-    # TRACK LIMITS
-    # ========================================================
+    if gap <= 0.35:
+        if (
+            sector >= 0.45
+            and pace >= 0.42
+            and tyre >= 0.30
+            and battery >= 0.30
+        ):
+            return "ATTACK"
 
-    track_limit_risk = clamp(
-        race.get(
-            "track_limit_risk",
-            0.0
-        )
-    )
+    if gap <= 0.50:
+        if (
+            probability >= 0.40
+            and sector >= 0.50
+            and pace >= 0.45
+        ):
+            return "ATTACK"
 
-    probability *= (
-        1.0
-        - 0.30 * track_limit_risk
-    )
+        if (
+            opportunity >= 0.65
+            and sector >= 0.60
+            and pace >= 0.50
+            and tyre >= 0.45
+        ):
+            return "ATTACK"
 
+    if gap <= 0.65:
+        if (
+            probability >= 0.55
+            and sector >= 0.60
+            and pace >= 0.55
+        ):
+            return "ATTACK"
 
-    # ========================================================
-    # RACE CONTROL
-    # ========================================================
+    # --------------------------------------------------------
+    # Wider attack window only when ML + race state agree.
+    # --------------------------------------------------------
 
-    condition = race.get(
-        "race_condition",
-        "NORMAL"
-    )
+    if (
+        probability >= 0.62
+        and gap <= 0.85
+        and sector >= 0.65
+        and pace >= 0.60
+    ):
+        return "ATTACK"
 
-    probability *= {
+    # --------------------------------------------------------
+    # Defence must be driven by the actual rear threat.
+    # --------------------------------------------------------
 
-        "NORMAL": 1.00,
+    if threat >= 0.78 and gap > 0.70:
+        return "DEFEND"
 
-        "WET": 0.88,
-
-        "VSC": 0.35,
-
-        "SAFETY CAR": 0.10
-
-    }.get(
-        condition,
-        1.00
-    )
-
-
-    return round(
-        clamp(
-            probability,
-            0.0,
-            0.95
-        ),
-        3
-    )
+    return "STAY"
 
 
 # ============================================================
-# EXPLAINABILITY
+# LEGACY / COMPATIBILITY API
 # ============================================================
 
-def calculate_overtake_factors(race):
-
-    gap = float(
-        race.get(
-            "gap_ahead",
-            2.0
-        )
-    )
-
-    if gap <= 0.30:
-
-        gap_score = 1.00
-
-    elif gap <= 0.60:
-
-        gap_score = 0.85
-
-    elif gap <= 1.00:
-
-        gap_score = 0.65
-
-    elif gap <= 1.50:
-
-        gap_score = 0.40
-
-    else:
-
-        gap_score = 0.15
-
-
-    ml_probability = (
-        calculate_ml_probability(
-            race
-        )
-    )
-
+def calculate_overtake_probability_details(race):
+    ml_probability = calculate_ml_probability(race)
+    heuristic_probability = calculate_heuristic_probability(race)
+    hybrid_probability = calculate_overtake_probability(race)
 
     return {
-
-        "gap":
-            gap_score,
-
-        "pace":
-            clamp(
-                (
-                    race.get(
-                        "pace_advantage",
-                        0.5
-                    )
-                    + 0.5
-                )
-                / 1.0
-            ),
-
-        "tyres":
-            clamp(
-                race.get(
-                    "tyre_advantage",
-                    0.5
-                )
-            ),
-
-        "energy":
-            clamp(
-                race.get(
-                    "battery",
-                    100.0
-                )
-                / 100.0
-            ),
-
-        "opportunity":
-            clamp(
-                race.get(
-                    "overtake_opportunity",
-                    0.5
-                )
-            ),
-
-        "sector":
-            clamp(
-                race.get(
-                    "sector_overtaking_base",
-                    0.5
-                )
-            ),
-
-        "track_limit_risk":
-            clamp(
-                race.get(
-                    "track_limit_risk",
-                    0.0
-                )
-            ),
-
-        "rule_factor":
-            calculate_rule_factor(
-                race
-            ),
-
-        "race_condition":
-            race.get(
-                "race_condition",
-                "NORMAL"
-            ),
-
-        "ml_probability":
-            ml_probability
+        "ml_probability": ml_probability,
+        "heuristic_probability": heuristic_probability,
+        "hybrid_probability": hybrid_probability,
+        "recommendation": get_overtake_recommendation(race),
+        "threshold": MODEL_THRESHOLD,
+        "model_available": ML_AVAILABLE
     }
+
+
+def calculate_overall_probability(race):
+    return calculate_overtake_probability(race)
+
+
+def predict_overtake(race):
+    probability = calculate_overtake_probability(race)
+
+    return {
+        "probability": probability,
+        "recommendation": get_overtake_recommendation(race),
+        "model_available": ML_AVAILABLE
+    }
+
+
+# ============================================================
+# INITIAL MODEL CHECK
+# ============================================================
+
+_load_model()
